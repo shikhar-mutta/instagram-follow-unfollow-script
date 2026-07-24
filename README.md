@@ -60,7 +60,7 @@ close_friend_1
 **1. Fetch your followers**
 
 ```bash
-python get_followers.py
+python3 get_followers.py
 ```
 
 Saves a sorted list to `followers.txt`.
@@ -68,7 +68,7 @@ Saves a sorted list to `followers.txt`.
 **2. Find who doesn't follow you back**
 
 ```bash
-python get_non_followers.py
+python3 get_non_followers.py
 ```
 
 Saves `following.txt` (everyone you follow) and `non_followers.txt` (people you follow who don't follow you back).
@@ -76,14 +76,14 @@ Saves `following.txt` (everyone you follow) and `non_followers.txt` (people you 
 **3. Unfollow non-followers**
 
 ```bash
-python unfollow.py              # dry run - only prints who WOULD be unfollowed
-python unfollow.py --confirm    # actually unfollows (respects the cap and whitelist)
+python3 unfollow.py              # dry run - only prints who WOULD be unfollowed
+python3 unfollow.py --confirm    # actually unfollows (respects the cap and whitelist)
 ```
 
 You can also point any script at a different credentials file:
 
 ```bash
-python unfollow.py --confirm mycreds.txt
+python3 unfollow.py --confirm mycreds.txt
 ```
 
 ## Safety Features
