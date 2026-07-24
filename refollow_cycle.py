@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-Unfollow Instagram accounts that don't follow you back, skipping a whitelist.
+Unfollow accounts that don't follow you back, then send a follow request to
+them again shortly after (unfollow -> pause -> refollow -> pause -> next).
+
+This "refresh" cycle puts you back near the top of their notifications /
+followers list, which sometimes prompts a follow back. Rapid unfollow/refollow
+churn is more noticeable to Instagram's spam detection than a plain unfollow,
+so this is intentionally slower and capped - use sparingly.
 
 SAFETY FIRST:
-    - Defaults to a DRY RUN: it only prints who *would* be unfollowed.
-      Pass --confirm to actually unfollow.
-    - Conservative pacing: at most DAILY_LIMIT unfollows per 24h, with a random
-      30-60s pause between each, to reduce the chance of an Instagram block.
+    - Defaults to a DRY RUN: it only prints who *would* be cycled.
+      Pass --confirm to actually unfollow + refollow.
+    - Conservative pacing: at most RUN_LIMIT accounts per run, with a random
+      30-60s pause between the unfollow and the refollow, and another random
+      30-60s pause before moving to the next account.
     - Never touches anyone listed in whitelist.txt.
 
 Reads credentials from a file (default: credentials.txt) shaped like:
@@ -14,19 +21,18 @@ Reads credentials from a file (default: credentials.txt) shaped like:
     pass : your_password
 
 Requirements:
-    pip install instagrapi
+    pip install instagrapi wcwidth
 
 Usage:
-    python unfollow.py                 # dry run (preview only, no changes)
-    python unfollow.py --confirm       # actually unfollow (respects the cap)
-    python unfollow.py --confirm mycreds.txt
+    python3 refollow_cycle.py                 # dry run (preview only, no changes)
+    python3 refollow_cycle.py --confirm        # actually unfollow + refollow
+    python3 refollow_cycle.py --confirm mycreds.txt
 
 Files:
-    whitelist.txt        - usernames to NEVER unfollow (one per line)
-    unfollowed_log.txt   - append-only log of who was unfollowed and when
+    whitelist.txt      - usernames to NEVER touch (one per line)
+    refollow_log.txt   - append-only log of every unfollow/refollow action
 """
 
-import json
 import random
 import sys
 import time
@@ -44,15 +50,17 @@ from instagrapi.exceptions import (
 )
 from wcwidth import wcswidth
 
+import json
+
 SESSION_FILE = Path("session.json")
 CREDENTIALS_FILE = Path("credentials.txt")
 WHITELIST_FILE = Path("whitelist.txt")
-LOG_FILE = Path("unfollowed_log.txt")
+LOG_FILE = Path("refollow_log.txt")
 
 # Conservative pacing to avoid Instagram blocks.
-RUN_LIMIT = 50            # max unfollows per run (safety throttle)
-MIN_DELAY = 30            # seconds, minimum pause between unfollows
-MAX_DELAY = 60            # seconds, maximum pause between unfollows
+RUN_LIMIT = 50            # max accounts cycled per run (safety throttle)
+MIN_DELAY = 30            # seconds, minimum pause between actions
+MAX_DELAY = 60            # seconds, maximum pause between actions
 TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S"
 COL_WIDTH = 61            # display width of the username+name column (URL starts after it)
 
@@ -66,7 +74,8 @@ def pad_display(text: str, width: int = COL_WIDTH) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Login machinery (shared shape with get_followers.py / get_non_followers.py)  #
+# Login machinery (shared shape with get_followers.py / get_non_followers.py / #
+# unfollow.py)                                                                 #
 # --------------------------------------------------------------------------- #
 def read_credentials(path: Path) -> tuple[str, str]:
     """Read username/password from a file (key:value or plain two lines)."""
@@ -218,10 +227,10 @@ def login(credentials_file: Path) -> Client:
 
 
 # --------------------------------------------------------------------------- #
-# Whitelist + unfollow log helpers                                            #
+# Whitelist + action log helpers                                              #
 # --------------------------------------------------------------------------- #
 def load_whitelist(path: Path) -> set[str]:
-    """Read usernames to never unfollow (lowercased). Missing file = empty."""
+    """Read usernames to never touch (lowercased). Missing file = empty."""
     if not path.exists():
         print(f"No '{path}' found - nothing is whitelisted.")
         return set()
@@ -239,14 +248,14 @@ def load_whitelist(path: Path) -> set[str]:
     return names
 
 
-def log_unfollow(account: str, username: str) -> None:
-    """Append a timestamped, account-scoped unfollow record.
+def log_action(account: str, action: str, username: str) -> None:
+    """Append a timestamped, account-scoped record of an unfollow/refollow.
 
     The log is write-only: it is an audit trail of actions taken and is NOT
-    used to build the unfollow list.
+    used to build the target list.
     """
     url = f"https://www.instagram.com/{username}/"
-    line = f"{datetime.now().strftime(TIMESTAMP_FMT)}\t{account}\t{username}\t{url}\n"
+    line = f"{datetime.now().strftime(TIMESTAMP_FMT)}\t{account}\t{action}\t{username}\t{url}\n"
     with LOG_FILE.open("a", encoding="utf-8") as fh:
         fh.write(line)
 
@@ -263,7 +272,7 @@ def main() -> None:
     whitelist = load_whitelist(WHITELIST_FILE)
     cl = login(credentials_file)
     user_id = cl.user_id
-    account = cl.username  # scope the log/cap to the logged-in account
+    account = cl.username  # scope the log to the logged-in account
 
     # use_cache=False forces a fresh fetch from Instagram every run, so we never
     # act on stale follower/following data.
@@ -272,8 +281,7 @@ def main() -> None:
     print("Fetching your followers (live)...")
     followers = cl.user_followers(user_id, use_cache=False, amount=0)
 
-    # Non-followers, excluding only the whitelist. The unfollow log is NOT
-    # consulted here - the list is built purely from live data.
+    # Non-followers, excluding only the whitelist.
     skipped_whitelist = 0
     targets = []  # list of (user_id, UserShort)
     for uid, user in following.items():
@@ -296,35 +304,55 @@ def main() -> None:
     print(f"Will process this run: {len(batch)}\n")
 
     if not batch:
-        print("Nothing to unfollow.")
+        print("Nothing to cycle.")
         return
 
     if not confirm:
-        print("DRY RUN - no one will be unfollowed. These would be unfollowed:\n")
+        print("DRY RUN - no changes made. These would be unfollowed, then re-followed:\n")
         for _, user in batch:
             left = f"{user.username}  {user.full_name or ''}".rstrip()
             url = f"https://www.instagram.com/{user.username}/"
             print(f"  {pad_display(left)}{url}")
         print(
-            f"\nTo actually unfollow these {len(batch)} accounts, run:\n"
+            f"\nTo actually cycle these {len(batch)} accounts, run:\n"
             f"    python3 {Path(sys.argv[0]).name} --confirm"
         )
         return
 
-    print(f"Unfollowing {len(batch)} accounts (random {MIN_DELAY}-{MAX_DELAY}s between each)...\n")
+    print(
+        f"Cycling {len(batch)} accounts (unfollow -> {MIN_DELAY}-{MAX_DELAY}s -> "
+        f"refollow -> {MIN_DELAY}-{MAX_DELAY}s -> next)...\n"
+    )
     failures = 0
     for i, (uid, user) in enumerate(batch, start=1):
         try:
             cl.user_unfollow(uid)
-            log_unfollow(account, user.username)
+            log_action(account, "unfollow", user.username)
             print(f"[{i}/{len(batch)}] unfollowed {user.username}")
+        except PleaseWaitFewMinutes:
+            print("Instagram says to wait a few minutes - stopping to stay safe.")
+            break
+        except Exception as exc:
+            failures += 1
+            print(f"[{i}/{len(batch)}] FAILED to unfollow {user.username}: {exc}")
+            if failures >= 3:
+                print("Too many consecutive failures - stopping to stay safe.")
+                break
+            continue  # skip the refollow if the unfollow itself failed
+
+        time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+
+        try:
+            cl.user_follow(uid)
+            log_action(account, "refollow", user.username)
+            print(f"[{i}/{len(batch)}] refollowed {user.username}")
             failures = 0
         except PleaseWaitFewMinutes:
             print("Instagram says to wait a few minutes - stopping to stay safe.")
             break
         except Exception as exc:
             failures += 1
-            print(f"[{i}/{len(batch)}] FAILED {user.username}: {exc}")
+            print(f"[{i}/{len(batch)}] FAILED to refollow {user.username}: {exc}")
             if failures >= 3:
                 print("Too many consecutive failures - stopping to stay safe.")
                 break

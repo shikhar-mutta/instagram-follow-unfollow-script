@@ -51,21 +51,36 @@ def pad_display(text: str, width: int = COL_WIDTH) -> str:
 def complete_two_factor(cl: Client, username: str) -> None:
     """Finish a 2FA login using the challenge already issued by Instagram.
 
-    Reuses the original two_factor_identifier (so no second code is sent) and
-    picks the right verification method (authenticator app vs SMS).
+    Reuses the original two_factor_identifier (so no second code is sent).
+    Instagram doesn't report which channel it actually used to send the
+    code, so when more than one is enabled on the account, ask which one
+    arrived instead of guessing - a wrong guess makes Instagram reject even
+    a correct code.
     """
     info = cl.last_json.get("two_factor_info", {})
     identifier = info.get("two_factor_identifier")
     phone = info.get("obfuscated_phone_number", "your phone")
 
-    # Pick the verification method Instagram actually used to send the code.
-    # "6" = WhatsApp, "3" = authenticator app (TOTP), "1" = SMS text message.
+    # "1" = SMS, "6" = WhatsApp, "3" = authenticator app (TOTP).
+    channels = []
+    if info.get("sms_two_factor_on"):
+        channels.append(("1", f"SMS to {phone}"))
     if info.get("whatsapp_two_factor_on"):
-        method, where = "6", f"WhatsApp to {phone}"
-    elif info.get("totp_two_factor_on"):
-        method, where = "3", "authenticator app"
+        channels.append(("6", f"WhatsApp to {phone}"))
+    if info.get("totp_two_factor_on"):
+        channels.append(("3", "authenticator app"))
+    if not channels:
+        channels = [("1", f"SMS to {phone}")]
+
+    if len(channels) == 1:
+        method, where = channels[0]
     else:
-        method, where = "1", f"SMS to {phone}"
+        print("Instagram may have sent the code via any of these channels:")
+        for i, (_, label) in enumerate(channels, start=1):
+            print(f"  {i}. {label}")
+        choice = input(f"Which one did you receive? [1-{len(channels)}, default 1]: ").strip()
+        idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(channels) else 0
+        method, where = channels[idx]
 
     code = input(f"Enter the 2FA code ({where}): ").strip()
     data = {
