@@ -6,6 +6,7 @@ Small set of Python scripts, built on [instagrapi](https://github.com/subzeroid/
 - Find accounts you follow that don't follow you back.
 - Safely unfollow those non-followers, with a dry run, daily/per-run cap, random delays, and a whitelist of accounts to never touch.
 - Optionally unfollow non-followers and immediately send a follow request back to them, to refresh the relationship.
+- Do all of the above from a local web UI with account thumbnails and multi-select, instead of the CLI.
 
 ## Use Case
 
@@ -23,6 +24,7 @@ If you follow a lot of accounts, it's hard to tell who follows you back and who 
 | [get_non_followers.py](get_non_followers.py) | Logs in, saves `following.txt` and `non_followers.txt` (people you follow who don't follow you back). |
 | [unfollow.py](unfollow.py) | Unfollows accounts from the non-follower list, skipping anyone in `whitelist.txt`. Defaults to a dry run. |
 | [refollow_cycle.py](refollow_cycle.py) | Unfollows non-followers, then sends a follow request back to each shortly after. Defaults to a dry run. |
+| [web_app.py](web_app.py) | Local Streamlit web UI: log in, browse non-followers as a thumbnail grid, multi-select, bulk unfollow or unfollow+refollow. |
 | `credentials.txt` | Your Instagram username/password (not committed — see [Security](#security)). |
 | `session.json` | Cached login session so you don't have to re-authenticate (and re-trigger 2FA/challenges) every run. |
 | `whitelist.txt` | Usernames that should never be touched, one per line. |
@@ -37,9 +39,10 @@ If you follow a lot of accounts, it's hard to tell who follows you back and who 
 - Python 3.10+
 - [instagrapi](https://github.com/subzeroid/instagrapi)
 - [wcwidth](https://pypi.org/project/wcwidth/)
+- [streamlit](https://streamlit.io/) — only needed for `web_app.py`
 
 ```bash
-pip install instagrapi wcwidth
+pip install instagrapi wcwidth streamlit
 ```
 
 ## Setup
@@ -104,6 +107,16 @@ For each eligible account this does: unfollow → wait 30-60s → send a follow 
 
 Every dry run also saves the full list to `refollow_preview.txt` for the same review-then-whitelist workflow described above.
 
+**5. Web UI (thumbnails + bulk actions)**
+
+```bash
+streamlit run web_app.py
+```
+
+Opens a local browser tab (`http://localhost:8501` by default). Log in (2FA supported), click **Load non-followers** to fetch the live list with profile-picture thumbnails, tick the accounts you want, then click **Unfollow selected** or **Unfollow + Refollow selected**. A progress bar and live log show what's happening. Same whitelist, same session file, same audit logs (`unfollowed_log.txt` / `refollow_log.txt`) as the CLI scripts — anyone in `whitelist.txt` never shows up in the grid.
+
+This is local-only (binds to `localhost`) and holds your live Instagram session in memory for as long as the tab/server is open — don't expose the port beyond your own machine. Because it's driven from a browser tab, keep the tab open for the whole run; for very large unattended batches, prefer `unfollow.py` / `refollow_cycle.py` instead.
+
 ## Safety Features
 
 `unfollow.py` and `refollow_cycle.py` are intentionally conservative to reduce the risk of Instagram flagging or blocking your account:
@@ -120,7 +133,7 @@ Note that unfollow/refollow churn is more visible to Instagram's spam detection 
 
 ## Session & 2FA
 
-All scripts share the same login flow:
+All scripts (including the web UI) share the same login flow:
 
 - On first run, you're logged in with `credentials.txt` and the session is cached to `session.json` so subsequent runs skip the login step.
 - If `session.json` belongs to a different account than `credentials.txt`, it's discarded and a fresh login happens.
