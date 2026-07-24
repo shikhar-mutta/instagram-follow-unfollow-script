@@ -56,6 +56,7 @@ SESSION_FILE = Path("session.json")
 CREDENTIALS_FILE = Path("credentials.txt")
 WHITELIST_FILE = Path("whitelist.txt")
 LOG_FILE = Path("refollow_log.txt")
+PREVIEW_FILE = Path("refollow_preview.txt")
 
 # Conservative pacing to avoid Instagram blocks.
 RUN_LIMIT = 50            # max accounts cycled per run (safety throttle)
@@ -308,13 +309,23 @@ def main() -> None:
         return
 
     if not confirm:
-        print("DRY RUN - no changes made. These would be unfollowed, then re-followed:\n")
+        lines = []
         for _, user in batch:
             left = f"{user.username}  {user.full_name or ''}".rstrip()
             url = f"https://www.instagram.com/{user.username}/"
-            print(f"  {pad_display(left)}{url}")
+            lines.append(f"{pad_display(left)}{url}")
+
+        header = f"Would unfollow then refollow ({len(batch)}) - dry run, nothing changed yet"
+        body = "\n".join([header, "-" * len(header), *lines])
+        PREVIEW_FILE.write_text(body + "\n", encoding="utf-8")
+
+        print("DRY RUN - no changes made. These would be unfollowed, then re-followed:\n")
+        for line in lines:
+            print(f"  {line}")
+        print(f"\nFull list saved to {PREVIEW_FILE.resolve()}")
         print(
-            f"\nTo actually cycle these {len(batch)} accounts, run:\n"
+            f"Review it - add any usernames you want to keep to '{WHITELIST_FILE}', "
+            "then run:\n"
             f"    python3 {Path(sys.argv[0]).name} --confirm"
         )
         return

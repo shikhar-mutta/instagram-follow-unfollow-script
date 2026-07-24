@@ -28,6 +28,8 @@ If you follow a lot of accounts, it's hard to tell who follows you back and who 
 | `whitelist.txt` | Usernames that should never be touched, one per line. |
 | `unfollowed_log.txt` | Append-only audit log of every account unfollowed by `unfollow.py`, with timestamp. |
 | `refollow_log.txt` | Append-only audit log of unfollow/refollow actions from `refollow_cycle.py`, with timestamp. |
+| `unfollow_preview.txt` | Written on every `unfollow.py` dry run: the exact list that would be unfollowed. |
+| `refollow_preview.txt` | Written on every `refollow_cycle.py` dry run: the exact list that would be cycled. |
 | `followers.txt` / `following.txt` / `non_followers.txt` | Generated output lists. |
 
 ## Requirements
@@ -83,6 +85,8 @@ python3 unfollow.py              # dry run - only prints who WOULD be unfollowed
 python3 unfollow.py --confirm    # actually unfollows (respects the cap and whitelist)
 ```
 
+Every dry run also saves the full list to `unfollow_preview.txt`. Open it, decide who you actually want to keep, add those usernames to `whitelist.txt`, then re-run the dry run to confirm they're excluded before passing `--confirm`.
+
 You can also point any script at a different credentials file:
 
 ```bash
@@ -97,6 +101,8 @@ python3 refollow_cycle.py --confirm    # actually unfollows then refollows (resp
 ```
 
 For each eligible account this does: unfollow → wait 30-60s → send a follow request back → wait 30-60s → move to the next account. The idea is that reappearing in someone's notifications/followers list can prompt a follow back. It targets the same live-computed non-follower list as `unfollow.py` (whitelist respected), just as a separate script so plain permanent unfollows and the cycle behavior stay independent.
+
+Every dry run also saves the full list to `refollow_preview.txt` for the same review-then-whitelist workflow described above.
 
 ## Safety Features
 

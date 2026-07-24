@@ -48,6 +48,7 @@ SESSION_FILE = Path("session.json")
 CREDENTIALS_FILE = Path("credentials.txt")
 WHITELIST_FILE = Path("whitelist.txt")
 LOG_FILE = Path("unfollowed_log.txt")
+PREVIEW_FILE = Path("unfollow_preview.txt")
 
 # Conservative pacing to avoid Instagram blocks.
 RUN_LIMIT = 50            # max unfollows per run (safety throttle)
@@ -300,13 +301,23 @@ def main() -> None:
         return
 
     if not confirm:
-        print("DRY RUN - no one will be unfollowed. These would be unfollowed:\n")
+        lines = []
         for _, user in batch:
             left = f"{user.username}  {user.full_name or ''}".rstrip()
             url = f"https://www.instagram.com/{user.username}/"
-            print(f"  {pad_display(left)}{url}")
+            lines.append(f"{pad_display(left)}{url}")
+
+        header = f"Would unfollow ({len(batch)}) - dry run, nothing changed yet"
+        body = "\n".join([header, "-" * len(header), *lines])
+        PREVIEW_FILE.write_text(body + "\n", encoding="utf-8")
+
+        print("DRY RUN - no one will be unfollowed. These would be unfollowed:\n")
+        for line in lines:
+            print(f"  {line}")
+        print(f"\nFull list saved to {PREVIEW_FILE.resolve()}")
         print(
-            f"\nTo actually unfollow these {len(batch)} accounts, run:\n"
+            f"Review it - add any usernames you want to keep to '{WHITELIST_FILE}', "
+            "then run:\n"
             f"    python3 {Path(sys.argv[0]).name} --confirm"
         )
         return
