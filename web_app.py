@@ -18,10 +18,12 @@ refollow_cycle.py), so whatever you whitelist there is respected here too.
 import json
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+import requests
 import streamlit as st
 from instagrapi import Client
 from instagrapi.exceptions import (
@@ -41,8 +43,9 @@ DEFAULT_RUN_LIMIT = 50
 DEFAULT_MIN_DELAY = 30
 DEFAULT_MAX_DELAY = 60
 TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S"
-GRID_COLUMNS = 5
-SHOWN_LIMIT = 200  # cap rendered thumbnails per page for performance
+GRID_COLUMNS = 3
+THUMB_WIDTH = 120
+PAGE_SIZE = 50  # accounts shown per page
 
 st.set_page_config(page_title="IG Follow/Unfollow", page_icon="📷", layout="wide")
 
@@ -104,6 +107,80 @@ def load_whitelist() -> set[str]:
         if name:
             names.add(name)
     return names
+
+
+def add_to_whitelist(username: str) -> None:
+    """Append a username to whitelist.txt, unless it's already there."""
+    if username.lower() in load_whitelist():
+        return
+    with WHITELIST_FILE.open("a", encoding="utf-8") as fh:
+        fh.write(f"{username}\n")
+
+
+def list_whitelist_entries() -> list[str]:
+    """Usernames currently in whitelist.txt, original casing, de-duplicated."""
+    if not WHITELIST_FILE.exists():
+        return []
+    seen: set[str] = set()
+    names = []
+    for raw in WHITELIST_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = line.lstrip("@").split()[0]
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+    return sorted(names, key=str.lower)
+
+
+def remove_from_whitelist(username: str) -> None:
+    """Remove a username from whitelist.txt (comments/blank lines untouched)."""
+    if not WHITELIST_FILE.exists():
+        return
+    kept = []
+    for raw in WHITELIST_FILE.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and line.lstrip("@").split()[0].lower() == username.lower():
+            continue
+        kept.append(raw)
+    WHITELIST_FILE.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+
+
+def fetch_thumbnail(cl: Client, url: str) -> tuple[bytes | None, str | None]:
+    """Fetch a profile picture's bytes server-side instead of handing the raw
+    URL to the browser (Instagram's CDN frequently rejects hotlinked/browser
+    requests). Tries instagrapi's own session first (matches the Instagram
+    app's headers), then falls back to a plain browser-like request.
+
+    Returns (bytes, None) on success, or (None, reason) on failure - the
+    reason is shown in the UI so a real failure cause can be seen instead of
+    silently guessing.
+    """
+    try:
+        resp = cl.private.get(url, timeout=8)
+        if resp.status_code == 200 and resp.content:
+            return resp.content, None
+        primary_error = f"HTTP {resp.status_code} (instagrapi session)"
+    except Exception as exc:
+        primary_error = f"{type(exc).__name__}: {exc} (instagrapi session)"
+
+    try:
+        resp = requests.get(
+            url,
+            timeout=8,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                )
+            },
+        )
+        if resp.status_code == 200 and resp.content:
+            return resp.content, None
+        return None, f"{primary_error}; HTTP {resp.status_code} (plain request)"
+    except Exception as exc:
+        return None, f"{primary_error}; {type(exc).__name__}: {exc} (plain request)"
 
 
 def log_action(log_file: Path, account: str, action: str, username: str) -> None:
@@ -177,6 +254,9 @@ ss.setdefault("client", None)
 ss.setdefault("username", "")
 ss.setdefault("non_followers", None)  # list[(uid, UserShort)] once loaded
 ss.setdefault("whitelist_skipped", 0)
+ss.setdefault("thumb_cache", {})  # profile_pic_url -> (bytes | None, error | None)
+ss.setdefault("page", 0)
+ss.setdefault("last_search", "")
 
 
 # --------------------------------------------------------------------------- #
@@ -291,52 +371,35 @@ elif ss["stage"] == "dashboard":
     targets = ss["non_followers"]
     st.write(
         f"**{len(targets)}** accounts don't follow you back "
-        f"({ss['whitelist_skipped']} whitelisted accounts hidden - edit `whitelist.txt` to change that)."
+        f"({ss['whitelist_skipped']} whitelisted accounts hidden this load)."
     )
 
     if st.button("Refresh list"):
         ss["non_followers"] = None
         st.rerun()
 
-    search = st.text_input("Filter by username or name", "")
-    filtered = (
-        [
-            (uid, user)
-            for uid, user in targets
-            if search.lower() in user.username.lower()
-            or search.lower() in (user.full_name or "").lower()
-        ]
-        if search
-        else targets
-    )
-    shown = filtered[:SHOWN_LIMIT]
-    if len(filtered) > SHOWN_LIMIT:
-        st.caption(f"Showing first {SHOWN_LIMIT} of {len(filtered)} matches - narrow your filter to see more.")
+    whitelist_entries = list_whitelist_entries()
+    with st.expander(f"🔖 Whitelisted accounts ({len(whitelist_entries)})"):
+        if not whitelist_entries:
+            st.caption("No whitelisted accounts yet.")
+        for name in whitelist_entries:
+            wcol1, wcol2, wcol3 = st.columns([3, 1, 1])
+            with wcol1:
+                st.write(f"@{name}")
+            with wcol2:
+                st.link_button(
+                    "View profile", f"https://www.instagram.com/{name}/", use_container_width=True
+                )
+            with wcol3:
+                if st.button("Remove", key=f"unwl_{name}", use_container_width=True):
+                    remove_from_whitelist(name)
+                    st.rerun()
 
-    sel1, sel2, _ = st.columns([1, 1, 4])
-    with sel1:
-        if st.button("Select all shown"):
-            for uid, _ in shown:
-                ss[f"sel_{uid}"] = True
-            st.rerun()
-    with sel2:
-        if st.button("Select none"):
-            for uid, _ in shown:
-                ss[f"sel_{uid}"] = False
-            st.rerun()
-
-    # Thumbnail grid
-    for row_start in range(0, len(shown), GRID_COLUMNS):
-        row = shown[row_start : row_start + GRID_COLUMNS]
-        cols = st.columns(GRID_COLUMNS)
-        for col, (uid, user) in zip(cols, row):
-            with col:
-                if user.profile_pic_url:
-                    st.image(str(user.profile_pic_url), width=90)
-                st.checkbox(f"@{user.username}", key=f"sel_{uid}", help=user.full_name or "")
-
+    # --------------------------------------------------------------------- #
+    # Bulk actions - kept at the top so they're reachable without scrolling #
+    # past a full page of thumbnails.                                       #
+    # --------------------------------------------------------------------- #
     selected = [(uid, user) for uid, user in targets if ss.get(f"sel_{uid}")]
-    st.divider()
     st.write(f"**{len(selected)} selected**")
 
     with st.expander("Advanced settings (pacing / safety)"):
@@ -359,7 +422,7 @@ elif ss["stage"] == "dashboard":
         if len(selected) > run_limit:
             st.warning(f"{len(selected)} selected, processing first {run_limit} (per-run cap).")
 
-        progress = st.progress(0.0)
+        progress = st.progress(0.0, text=f"0/{len(batch)} processed (0%)")
         status = st.empty()
         log_box = st.empty()
         lines: list[str] = []
@@ -367,6 +430,9 @@ elif ss["stage"] == "dashboard":
         def log_line(text: str) -> None:
             lines.append(text)
             log_box.code("\n".join(lines[-40:]))
+
+        def update_progress(i: int, total: int) -> None:
+            progress.progress(i / total, text=f"{i}/{total} processed ({int(i / total * 100)}%)")
 
         done_uids = set()
         failures = 0
@@ -388,7 +454,7 @@ elif ss["stage"] == "dashboard":
             except Exception as exc:
                 failures += 1
                 log_line(f"[{i}/{len(batch)}] FAILED to unfollow @{user.username}: {exc}")
-                progress.progress(i / len(batch))
+                update_progress(i, len(batch))
                 if failures >= 3:
                     log_line("Too many consecutive failures - stopping to stay safe.")
                     stopped = True
@@ -405,7 +471,7 @@ elif ss["stage"] == "dashboard":
                     failures = 0
                 except PleaseWaitFewMinutes:
                     log_line("Instagram says to wait a few minutes - stopping to stay safe.")
-                    progress.progress(i / len(batch))
+                    update_progress(i, len(batch))
                     stopped = True
                     break
                 except Exception as exc:
@@ -413,11 +479,11 @@ elif ss["stage"] == "dashboard":
                     log_line(f"[{i}/{len(batch)}] FAILED to refollow @{user.username}: {exc}")
                     if failures >= 3:
                         log_line("Too many consecutive failures - stopping to stay safe.")
-                        progress.progress(i / len(batch))
+                        update_progress(i, len(batch))
                         stopped = True
                         break
 
-            progress.progress(i / len(batch))
+            update_progress(i, len(batch))
             ss[f"sel_{uid}"] = False
 
             if i < len(batch):
@@ -430,3 +496,118 @@ elif ss["stage"] == "dashboard":
         # (whether or not they were re-followed) - drop them from the working list.
         if done_uids:
             ss["non_followers"] = [t for t in ss["non_followers"] if t[0] not in done_uids]
+
+    st.divider()
+
+    # Re-read: the action block above may have removed accounts.
+    targets = ss["non_followers"]
+
+    search = st.text_input("Filter by username or name", "")
+    filtered = (
+        [
+            (uid, user)
+            for uid, user in targets
+            if search.lower() in user.username.lower()
+            or search.lower() in (user.full_name or "").lower()
+        ]
+        if search
+        else targets
+    )
+
+    if search != ss["last_search"]:
+        ss["page"] = 0
+        ss["last_search"] = search
+    total_pages = max(1, -(-len(filtered) // PAGE_SIZE))  # ceil division
+    ss["page"] = min(max(ss["page"], 0), total_pages - 1)
+
+    page_col1, page_col2, page_col3 = st.columns([1, 3, 1])
+    with page_col1:
+        if st.button("◀ Prev", disabled=ss["page"] <= 0):
+            ss["page"] -= 1
+            st.rerun()
+    with page_col2:
+        st.write(f"Page {ss['page'] + 1} of {total_pages} ({len(filtered)} accounts, {PAGE_SIZE} per page)")
+    with page_col3:
+        if st.button("Next ▶", disabled=ss["page"] >= total_pages - 1):
+            ss["page"] += 1
+            st.rerun()
+
+    page_start = ss["page"] * PAGE_SIZE
+    shown = filtered[page_start : page_start + PAGE_SIZE]
+
+    sel1, sel2, _ = st.columns([1, 1, 4])
+    with sel1:
+        if st.button("Select all on page"):
+            for uid, _ in shown:
+                ss[f"sel_{uid}"] = True
+            st.rerun()
+    with sel2:
+        if st.button("Select none on page"):
+            for uid, _ in shown:
+                ss[f"sel_{uid}"] = False
+            st.rerun()
+
+    # Prefetch any thumbnails not already cached (parallel, server-side).
+    uncached_urls = {
+        str(user.profile_pic_url)
+        for _, user in shown
+        if user.profile_pic_url and str(user.profile_pic_url) not in ss["thumb_cache"]
+    }
+    if uncached_urls:
+        with st.spinner(f"Loading {len(uncached_urls)} thumbnails..."):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                for url, data in zip(uncached_urls, executor.map(lambda u: fetch_thumbnail(cl, u), uncached_urls)):
+                    ss["thumb_cache"][url] = data
+
+    # Thumbnail grid
+    for row_start in range(0, len(shown), GRID_COLUMNS):
+        row = shown[row_start : row_start + GRID_COLUMNS]
+        cols = st.columns(GRID_COLUMNS)
+        for col, (uid, user) in zip(cols, row):
+            with col:
+                pic_url = str(user.profile_pic_url) if user.profile_pic_url else None
+                cached = ss["thumb_cache"].get(pic_url) if pic_url else None
+                thumb, _thumb_error = cached if cached else (None, None)
+
+                img_col, btn_col = st.columns([1, 1])
+                with img_col:
+                    if thumb:
+                        st.image(thumb, use_container_width=True)
+                    else:
+                        # Silent fallback - no error text, just a generic avatar.
+                        st.markdown(
+                            f"<div style='width:{THUMB_WIDTH}px;height:{THUMB_WIDTH}px;"
+                            "display:flex;align-items:center;justify-content:center;"
+                            "background:rgba(128,128,128,0.2);border-radius:50%;font-size:2.5em;'>"
+                            "👤</div>",
+                            unsafe_allow_html=True,
+                        )
+                with btn_col:
+                    st.link_button(
+                        "View profile",
+                        f"https://www.instagram.com/{user.username}/",
+                        use_container_width=True,
+                    )
+                    if st.button("Whitelist", key=f"wl_{uid}", use_container_width=True):
+                        add_to_whitelist(user.username)
+                        ss["non_followers"] = [t for t in ss["non_followers"] if t[0] != uid]
+                        ss["whitelist_skipped"] += 1
+                        ss.pop(f"sel_{uid}", None)
+                        st.rerun()
+                    if st.button(
+                        "Unfollow",
+                        key=f"uf_{uid}",
+                        use_container_width=True,
+                        help="Unfollows this account immediately (skips the bulk-action pacing delay).",
+                    ):
+                        try:
+                            cl.user_unfollow(uid)
+                            log_action(UNFOLLOW_LOG_FILE, ss["username"], "unfollow", user.username)
+                            ss["non_followers"] = [t for t in ss["non_followers"] if t[0] != uid]
+                            ss.pop(f"sel_{uid}", None)
+                            st.toast(f"Unfollowed @{user.username}")
+                        except Exception as exc:
+                            st.toast(f"Failed to unfollow @{user.username}: {exc}", icon="⚠️")
+                        st.rerun()
+
+                st.checkbox(f"@{user.username}", key=f"sel_{uid}", help=user.full_name or "")
