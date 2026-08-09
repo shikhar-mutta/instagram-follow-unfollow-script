@@ -291,7 +291,7 @@ def diff_and_log(label: str, snapshot_path: Path, diff_log_path: Path,
     Returns (added_count, removed_count).
     """
     previous = read_snapshot(snapshot_path)
-    current_usernames = set(current.keys())
+    current_usernames = {user.username for user in current.values()}
 
     added = sorted(current_usernames - previous, key=str.lower)
     removed = sorted(previous - current_usernames, key=str.lower)
