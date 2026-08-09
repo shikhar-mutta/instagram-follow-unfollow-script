@@ -25,6 +25,9 @@ If you follow a lot of accounts, it's hard to tell who follows you back and who 
 | [unfollow.py](unfollow.py) | Unfollows accounts from the non-follower list, skipping anyone in `whitelist.txt`. Defaults to a dry run. |
 | [refollow_cycle.py](refollow_cycle.py) | Unfollows non-followers, then sends a follow request back to each shortly after. Defaults to a dry run. |
 | [web_app.py](web_app.py) | Local Streamlit web UI: log in, browse non-followers as a thumbnail grid, multi-select, bulk unfollow or unfollow+refollow. |
+| [list_followers_log.py](list_followers_log.py) | Logs in and saves your current followers to `followers_log.txt` in the same timestamped log format as the audit logs. |
+| [list_following_log.py](list_following_log.py) | Logs in and saves everyone you currently follow to `following_log.txt`, same log format. |
+| [track_changes.py](track_changes.py) | Compares today's followers/following against the last saved snapshot and logs exactly who was added/removed, with counts. |
 | `credentials.txt` | Your Instagram username/password (not committed — see [Security](#security)). |
 | `session.json` | Cached login session so you don't have to re-authenticate (and re-trigger 2FA/challenges) every run. |
 | `whitelist.txt` | Usernames that should never be touched, one per line. |
@@ -33,6 +36,8 @@ If you follow a lot of accounts, it's hard to tell who follows you back and who 
 | `unfollow_preview.txt` | Written on every `unfollow.py` dry run: the exact list that would be unfollowed. |
 | `refollow_preview.txt` | Written on every `refollow_cycle.py` dry run: the exact list that would be cycled. |
 | `followers.txt` / `following.txt` / `non_followers.txt` | Generated output lists. |
+| `followers_log.txt` / `following_log.txt` | Current-snapshot lists, timestamped, written by `list_followers_log.py` / `list_following_log.py` (and refreshed by `track_changes.py`). |
+| `followers_diff_log.txt` / `following_diff_log.txt` | Append-only history of changes: who was added/removed each time `track_changes.py` runs, with counts. |
 
 ## Requirements
 
@@ -117,6 +122,39 @@ Opens a local browser tab (`http://localhost:8501` by default). Log in (2FA supp
 
 This is local-only (binds to `localhost`) and holds your live Instagram session in memory for as long as the tab/server is open — don't expose the port beyond your own machine. Because it's driven from a browser tab, keep the tab open for the whole run; for very large unattended batches, prefer `unfollow.py` / `refollow_cycle.py` instead.
 
+**6. Log current followers / following**
+
+```bash
+python3 list_followers_log.py
+python3 list_following_log.py
+```
+
+Each overwrites its output file (`followers_log.txt` / `following_log.txt`) with the current list, one line per account:
+
+```
+Total followers: 1219
+2026-08-09 06:17:42	shikhar_mutta_68	follower	shivaah_15	https://www.instagram.com/shivaah_15/
+```
+
+**7. Track who was added/removed**
+
+```bash
+python3 track_changes.py
+```
+
+Compares today's followers and following against the last saved `followers_log.txt` / `following_log.txt` snapshot, then:
+
+- Appends a summary + per-account entry to `followers_diff_log.txt` and `following_diff_log.txt`:
+
+  ```
+  2026-08-09 06:30:00	shikhar_mutta_68	followers	added: 3	removed: 2
+  2026-08-09 06:30:00	shikhar_mutta_68	added	new_follower1	https://www.instagram.com/new_follower1/
+  2026-08-09 06:30:00	shikhar_mutta_68	removed	old_follower1	https://www.instagram.com/old_follower1/
+  ```
+- Refreshes `followers_log.txt` / `following_log.txt` with today's snapshot, so the *next* run diffs against today instead of stacking up drift.
+
+Run it regularly (e.g. daily via cron) to build a history of who unfollowed you and who followed you back over time. The very first run has nothing to diff against, so everyone will show up as "added" — that's expected.
+
 ## Safety Features
 
 `unfollow.py` and `refollow_cycle.py` are intentionally conservative to reduce the risk of Instagram flagging or blocking your account:
@@ -142,12 +180,16 @@ All scripts (including the web UI) share the same login flow:
 
 ## Security
 
-`credentials.txt` and `session.json` contain sensitive data (your password / an authenticated session token). Keep them out of version control — add them to `.gitignore` if you put this project in a git repo:
+`credentials.txt` and `session.json` contain sensitive data (your password / an authenticated session token). They're excluded from version control via [.gitignore](.gitignore):
 
 ```
 credentials.txt
 session.json
+__pycache__/
+*.pyc
 ```
+
+If either file was ever committed before `.gitignore` was added, removing them going forward isn't enough — they'll still be readable in old commits. Scrub them from git history (or rotate the exposed password) before pushing to a public remote.
 
 ## Disclaimer
 
