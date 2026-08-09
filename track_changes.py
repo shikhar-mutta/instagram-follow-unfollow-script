@@ -37,9 +37,10 @@ Notes:
 """
 
 import json
+import random
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -59,6 +60,14 @@ FOLLOWERS_SNAPSHOT = Path("followers_log.txt")
 FOLLOWING_SNAPSHOT = Path("following_log.txt")
 FOLLOWERS_DIFF_LOG = Path("followers_diff_log.txt")
 FOLLOWING_DIFF_LOG = Path("following_diff_log.txt")
+
+# Pacing, to avoid tripping Instagram's automated-behaviour detection:
+LAST_RUN_FILE = Path(".track_changes_last_run")
+MIN_RUN_INTERVAL_HOURS = 6      # refuse to run again sooner than this after a successful run
+REQUEST_DELAY_RANGE = (1, 3)    # seconds; instagrapi inserts a random delay in this range
+                                 # between every internal API call, including pagination pages
+INTER_FETCH_DELAY = (15, 30)    # seconds; extra pause between the followers fetch and the
+                                 # following fetch, so they don't run back-to-back
 
 
 def complete_two_factor(cl: Client, username: str) -> None:
@@ -216,6 +225,36 @@ def login(credentials_file: Path) -> Client:
     return cl
 
 
+def enforce_cooldown() -> None:
+    """Refuse to run again too soon after the last successful run.
+
+    Running full followers/following pulls back-to-back (or many times in
+    one session) is exactly the pattern that trips Instagram's automated-
+    behaviour detection, so this is checked before we even attempt a login.
+    """
+    if not LAST_RUN_FILE.exists():
+        return
+
+    try:
+        last_run = datetime.fromisoformat(LAST_RUN_FILE.read_text().strip())
+    except (ValueError, OSError):
+        return
+
+    remaining = timedelta(hours=MIN_RUN_INTERVAL_HOURS) - (datetime.now() - last_run)
+    if remaining > timedelta(0):
+        hours, minutes = divmod(int(remaining.total_seconds()) // 60, 60)
+        sys.exit(
+            f"Last successful run was {last_run.strftime(TIMESTAMP_FMT)}. "
+            f"Waiting at least {MIN_RUN_INTERVAL_HOURS}h between runs to avoid "
+            f"tripping Instagram's automation detection - try again in "
+            f"about {hours}h {minutes}m."
+        )
+
+
+def record_run() -> None:
+    LAST_RUN_FILE.write_text(datetime.now().isoformat(), encoding="utf-8")
+
+
 def read_snapshot(path: Path) -> set[str]:
     """Usernames from a previous followers_log.txt/following_log.txt snapshot.
 
@@ -278,8 +317,11 @@ def diff_and_log(label: str, snapshot_path: Path, diff_log_path: Path,
 
 
 def main() -> None:
+    enforce_cooldown()
+
     credentials_file = Path(sys.argv[1]) if len(sys.argv) > 1 else CREDENTIALS_FILE
     cl = login(credentials_file)
+    cl.delay_range = list(REQUEST_DELAY_RANGE)
 
     account = cl.username
     user_id = cl.user_id
@@ -291,6 +333,10 @@ def main() -> None:
         "followers", FOLLOWERS_SNAPSHOT, FOLLOWERS_DIFF_LOG,
         followers, account, "follower", timestamp,
     )
+
+    pause = random.uniform(*INTER_FETCH_DELAY)
+    print(f"Pausing {pause:.0f}s before fetching following...")
+    time.sleep(pause)
 
     print("Fetching following...")
     following = cl.user_following(user_id, amount=0)
@@ -307,6 +353,8 @@ def main() -> None:
         f"Following: {following_added} added, {following_removed} removed "
         f"-> logged to {FOLLOWING_DIFF_LOG.resolve()}"
     )
+
+    record_run()
 
 
 if __name__ == "__main__":

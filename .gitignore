@@ -2,3 +2,4 @@ credentials.txt
 session.json
 __pycache__/
 *.pyc
+.track_changes_last_run

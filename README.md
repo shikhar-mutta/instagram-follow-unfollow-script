@@ -155,6 +155,12 @@ Compares today's followers and following against the last saved `followers_log.t
 
 Run it regularly (e.g. daily via cron) to build a history of who unfollowed you and who followed you back over time. The very first run has nothing to diff against, so everyone will show up as "added" — that's expected.
 
+`track_changes.py` paces itself to reduce the risk of Instagram flagging the account for automated behaviour:
+
+- **Cooldown between runs** — refuses to run again within `MIN_RUN_INTERVAL_HOURS` (default 6h) of the last successful run, tracked in `.track_changes_last_run`.
+- **Randomized request delay** — sets `delay_range` on the instagrapi client so every underlying API call (including pagination pages within a single followers/following pull) has a random 1-3s pause.
+- **Pause between fetches** — waits 15-30s between the followers pull and the following pull instead of firing them back-to-back.
+
 ## Safety Features
 
 `unfollow.py` and `refollow_cycle.py` are intentionally conservative to reduce the risk of Instagram flagging or blocking your account:
